@@ -1,0 +1,9 @@
+8000: .core.__START_PROGRAM
+800D: .core.__CALL_BACK__
+800F: .core.ZXBASIC_USER_DATA
+800F: .core.ZXBASIC_USER_DATA_END
+800F: .core.__MAIN_PROGRAM__
+800F: .start
+8012: .loop
+801B: .dly
+8030: .core.__END_PROGRAM
