@@ -20,8 +20,9 @@ const L2_START_16K as ubyte = 9
 const PAL_SIZE     as uinteger = 512
 
 ' spaceship.spr is typically 16K => 64 x 256-byte patterns
-const SPR_BYTES    as uinteger = $4000
-const SPR_BLOCKS   as ubyte    = 64
+const SPR_FILE_SKIP as uinteger = 128      ' +3DOS header
+const SPR_DATA_BYTES as uinteger = 512      ' 2 x 256-byte 8-bit patterns
+const SPR_SLOTS as ubyte = 2                ' upload 2 pattern slots (pattern 0..1)
 
 const SPR_ID       as ubyte = 0
 const SPR_PATTERN  as ubyte = 0           ' pattern 0, like your NextBASIC SPRITE ...,0,1
@@ -70,6 +71,15 @@ sub SetLayerOver(byval ord as ubyte)
     WriteNextReg($15, v)
 end sub
 
+SUB EnableLayer2Visible()
+    ASM
+        ld bc, $123B
+        ld a, 2          ; bit1 = Layer2 visible, all other bits 0 (no paging, no shadow)
+        out (c), a
+    END ASM
+END SUB
+
+
 sub PalUpload8(byval addr as uinteger, byval startIndex as ubyte)
     ' Upload 256 bytes (8-bit palette entries) via NextReg $41
     ' Assumes pal target already selected in $43, and $40 sets start index
@@ -81,36 +91,27 @@ sub PalUpload8(byval addr as uinteger, byval startIndex as ubyte)
     next i
 end sub
 
-'------------------------------------------------------------
-' Layer2 load (must be constants for NextBuild parser)
-'------------------------------------------------------------
-sub LoadLayer2_SL2()
-    ' Set Layer2 start 16K bank
-    WriteNextReg($12, L2_START_16K)
 
-    ' 16K bank 9 => 8K banks 18..23 (48K total)
-    LoadSDBank("nutter.sl2", 0, 8192,     0, 18)
-    LoadSDBank("nutter.sl2", 0, 8192,  8192, 19)
-    LoadSDBank("nutter.sl2", 0, 8192, 16384, 20)
-    LoadSDBank("nutter.sl2", 0, 8192, 24576, 21)
-    LoadSDBank("nutter.sl2", 0, 8192, 32768, 22)
-    LoadSDBank("nutter.sl2", 0, 8192, 40960, 23)
-end sub
+'------------------------------------------------------------
+' Layer2 load (NXI 256x192 8-bit, 48K across 8K banks)
+'------------------------------------------------------------
+SUB LoadLayer2_SL2()
+    WriteNextReg($12, L2_START_16K)      ' Layer2 start 16K bank
+    EnableLayer2Visible()   ' <-- add this
+    LoadSDBank("MG.nxi", 0, 0, 0, 18) ' address=$4000 (via 0), length=0 = autodetect, offset=0, start bank=18
+END SUB
 
 sub LoadLayer2Palette_PAL()
-    LoadSD("nutter.pal", @palL2(0), PAL_SIZE, 0)
+    ' MG.nxp is a 9-bit (512-byte) palette from gfx2next; PalUpload writes 2 bytes/entry via NextReg $44
+    LoadSD("MG.nxp", @palL2(0), PAL_SIZE, 0)
 
-    ' Select Layer2 first palette in NextReg $43 (bits 6..4 = %001)
-    ' Keep ULANext enable bit (bit0) set as well -> OR 1
-    ' Select Layer2 first palette for upload: bits 6..4 = 001 => $10
+    ' Select Layer2 first palette for upload: bits 6..4 = 001 => $10; keep ULANext enabled (bit0=1)
     WriteNextReg($43, ($10 BOR 1))
 
     ' Upload 256 colours (0 in NextLib means 256, because the loop uses DJNZ)
+    
     PalUpload(@palL2(0), 0, 0, 0)
-    ' Also upload the same palette to Sprites first palette (bits 6..4 = 010 => $20)
-    WriteNextReg($43, ($20 BOR 1))
-    PalUpload(@palL2(0), 0, 0, 0)
-
+    ' NOTE: NextBASIC demo does not set a sprite palette; leave sprite palette at power-on default (RGB332 passthrough)
 end sub
 
 '------------------------------------------------------------
@@ -172,11 +173,12 @@ end sub
 '------------------------------------------------------------
 
 sub DefineULAPalette()
+    BBREAK
     dim i as uinteger
 
     ' Build the same pattern you used in NextBASIC BANK 43
     for i = 0 to 255
-        if (i and 1) = 0 then
+        if (i band 1) = 0 then
             palULA8(i) = $60
         else
             palULA8(i) = $03
@@ -194,7 +196,6 @@ sub DefineULAPalette()
     'palULA8(5)  = $07
     'palULA8(6)  = $0B
     'palULA8(7)  = $0B
-
     ' If you relied on index $E3 for transparency "colour", keep it defined:
     palULA8($E3) = $E3
 
@@ -213,45 +214,64 @@ sub DefineULAPalette()
     WriteNextReg($4A, 0)
 end sub
 
-sub FillStarfield()
-    cls
+SUB FillStarfield()
+    CLS
 
-    ' Clip ULA (equivalent "layer dim" effect for the ULA plane)
-    ' NextLib ClipULA expects UBYTEs
+    ' Clip ULA (equivalent "LAYER DIM" for the ULA plane)
     ClipULA(10, 250, 15, 150)
 
-    dim r as ubyte
-    dim c as ubyte
-    dim col as ubyte
-    dim attrAddr as uinteger
+    DIM l AS UBYTE
+    DIM r AS UBYTE
+    DIM c AS UBYTE
+    DIM t AS UBYTE
+    DIM inkCol AS UBYTE
 
-    col = 0
-    for r = 0 to 23
-        for c = 0 to 31
-            if (c mod 3) = 0 then
-                col = $E3            ' transparent star
-            end if
-            print at r, c; "*";
-            attrAddr = 22528 + (r * 32) + c
-            poke attrAddr, col
+    DIM lu AS UINTEGER
+    DIM ru AS UINTEGER
+    DIM attrAddr AS UINTEGER
 
-            if (c mod 3) <> 0 then
-                col = col + 1
-            end if
-        next c
-    next r
-end sub
+    c = 0
+
+    FOR l = 1 TO 20
+        lu = l
+        FOR r = 1 TO 30
+            ru = r
+
+            ' Same logic as NextBASIC: temporarily force 227 on every 3rd column
+            t = c
+            inkCol = c
+            IF (r MOD 3) = 0 THEN
+                inkCol = $E3
+            END IF
+
+            PRINT AT l, r; "*";
+
+            ' IMPORTANT: do address math in 16-bit
+            attrAddr = 22528 + (lu * 32) + ru
+            POKE attrAddr, inkCol
+
+            ' restore + increment (matches NextBASIC)
+            c = t
+            c = c + 1
+            IF c >= 255 THEN c = 0
+        NEXT r
+    NEXT l
+END SUB
+
 
 '------------------------------------------------------------
 ' Sprites
 '------------------------------------------------------------
 sub InitMySprite()
-    LoadSD("spaceship.spr", @sprBuf(0), SPR_BYTES, 0)
+    ' spaceship.spr is a +3DOS CODE file; skip its 128-byte header and load only the 512 bytes of sprite pattern data
+    LoadSD("spaceship.spr", @sprBuf(0), SPR_DATA_BYTES, SPR_FILE_SKIP)
 
-    ' IMPORTANT: 16K SPR => 64 blocks of 256 bytes
-    InitSprites(SPR_BLOCKS, @sprBuf(0))
-    ' Sprite transparency index (NextReg $4B). Many .spr tools use 0 for 4-bit transparency.
-    WriteNextReg($4B, 3)   ' 4-bit sprite default transparency index ([wiki.specnext.dev](https://wiki.specnext.dev/Sprites))
+    ' Upload 2 x 256-byte 8-bit patterns into sprite pattern memory (patterns 0 and 1)
+    InitSprites(SPR_SLOTS, @sprBuf(0))
+
+    ' 8-bit sprite transparency index (NextReg $4B). This file uses $E3 extensively.
+    WriteNextReg($4B, $E3)
+
 
 
     sprX = 100 : sprY = 80
@@ -277,7 +297,7 @@ sub UpdateBouncingSprite()
     uy = sprY
 
     ' palette offset nibble = $10 (palette "1"), like SPRITE ...,0,1 in NextBASIC
-    UpdateSprite(ux, uy, SPR_ID, SPR_PATTERN, $10, $80)   ' $80 => 4-bit anchor, bytes 0..127 ([wiki.specnext.dev](https://wiki.specnext.dev/Sprites))
+    UpdateSprite(ux, uy, SPR_ID, SPR_PATTERN, 0, 0)   ' 8-bit anchor (byte5=0), no palette offset (attr2=0)
 end sub
 
 '------------------------------------------------------------
@@ -292,6 +312,7 @@ end sub
 '------------------------------------------------------------
 ' Main init
 '------------------------------------------------------------
+BBREAK
 border 0
 paper 0 : ink 7 : cls
 randomize
@@ -308,6 +329,7 @@ ShowLayer2(1)
 ' Load Layer2 image + palette (should overwrite circles)
 LoadLayer2_SL2()
 LoadLayer2Palette_PAL()
+
 
 ' ULA palette + starfield with transparency
 DefineULAPalette()
@@ -350,7 +372,7 @@ do
 
         ' every 3rd step: scroll ULA only upward (independent from Layer2 direction)
         if (ii mod 3) = 0 then
-            ScrollULA(0, p)
+            ScrollULA(p, p)
             p = p + 1
             if p >= 255 then p = 0
         end if
@@ -369,7 +391,7 @@ do
         if (ii mod 3) = 0 then
             p = p + 1
             if p >= 255 then p = 0
-            ScrollULA(0, p)
+            ScrollULA(p, p)
         end if
 
         if inkey$ <> "" then exit do
