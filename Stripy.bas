@@ -18,11 +18,7 @@ testIntAddress = @testInt
 
 print "TestInt address = ";testIntAddress
 
-spstr$ = input(3)
-
-speed = val(spstr$)
-
-runAT(speed)
+runAT(3)
 
 speed =  GetCPUSpeed()
 print "CPU Speed = ";speed
