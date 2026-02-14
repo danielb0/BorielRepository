@@ -1,7 +1,7 @@
 '!org=32768
 '!nb=autostart(dir=/games,copy=/nextzxos/autoexec.bas,sync=all)
 #define NEX
-#include <NextLib.bas>
+#include "Sprite_Continue.bas"
 
 '------------------------------------------------------------
 ' ZX Spectrum Next demo (Boriel ZX Basic + NextLib)
@@ -12,7 +12,7 @@
 '   - Sprite (spaceship.spr) with clipping and layer priority toggling
 '   - Layer2 and ULA pixel scrolling
 '
-' Assets:
+' Assets (must be alongside the .nex, or in the current working directory):
 '   - MG.nxi        (Layer2 image, loaded via LoadSDBank)
 '   - MG.nxp        (Layer2 9-bit palette, 512 bytes, streamed via NextReg $44)
 '   - spaceship.spr (+3DOS CODE file; skip 128-byte header)
@@ -37,13 +37,9 @@ const SPR_SLOTS      as ubyte    = 2     ' upload patterns 0..1
 const SPR_ID      as ubyte = 0
 const SPR_PATTERN as ubyte = 0
 
-dim palL2(511)   as ubyte
+dim palL2(511)    as ubyte
 dim sprBuf(16383) as ubyte     ' safe 16K buffer for sprite data
-dim palULA8(255) as ubyte
-
-' sprite motion
-dim sprX  as integer : dim sprY  as integer
-dim sprVX as integer : dim sprVY as integer
+dim palULA8(255)  as ubyte
 
 ' scrolling / effects
 dim p     as ubyte
@@ -88,8 +84,8 @@ sub EnableLayer2Visible()
 end sub
 
 '------------------------------------------------------------
-' 8-bit palette upload helper (NextReg $41 stream)
-'   - $43 selects palette target
+' 8-bit palette upload helper (streams 256 bytes to NextReg $41)
+'   - $43 selects palette target/control
 '   - $40 selects start index
 '------------------------------------------------------------
 sub PalUpload8(byval addr as uinteger, byval startIndex as ubyte)
@@ -159,7 +155,7 @@ sub DefineULAPalette()
     ' Full ink: ULA attribute byte maps directly to 0..255 palette indices.
     WriteNextReg($42, 255)
 
-    ' Global transparency index used by ULA fallback/background.
+    ' Global transparency palette index (used by ULA fallback when $4A = $E3).
     WriteNextReg($14, $E3)
 
     ' Start with a visible fallback (changed dynamically in the main loop).
@@ -220,29 +216,26 @@ sub InitMySprite()
     ' 8-bit sprite transparency index.
     WriteNextReg($4B, $E3)
 
-    sprX = 100 : sprY = 80
-    sprVX = 2  : sprVY = 1
-
     ' Clip sprites to similar region as the ULA clip.
     ClipSprite(10, 250, 15, 150)
-end sub
 
-sub UpdateBouncingSprite()
-    sprX = sprX + sprVX
-    sprY = sprY + sprVY
+    ' NextBASIC automatic sprite movement/animation (SPRITE CONTINUE + SPRITE MOVE)
+    SpriteContinue_Init()
 
-    if sprX > 319 then sprX = 319 : sprVX = -sprVX
-    if sprX <   0 then sprX =   0 : sprVX = -sprVX
+    ' Start inside the clip region so the sprite is visible immediately.
+    SpriteContinue_SetPos(0, 10, 48, 0)
 
-    if sprY > 191 then sprY = 191 : sprVY = -sprVY
-    if sprY <   0 then sprY =   0 : sprVY = -sprVY
-
-    dim ux as uinteger
-    dim uy as ubyte
-    ux = sprX
-    uy = sprY
-
-    UpdateSprite(ux, uy, SPR_ID, SPR_PATTERN, 0, 0)
+    ' SPRITE CONTINUE 0, 0 TO 304 STEP 2 RUN, 48 TO 192 STEP 5 RUN, 0,0,1,0
+    '   x: 0..304 step +2 run
+    '   y: 48..192 step +5 run
+    '   p: 0..0
+    '   r=0, d=1, flags=0
+    SpriteContinue_Config(0, _
+        0, 304, 2, 1, _
+        48, 192, 5, 1, _
+        0, 0, _
+        0, 1, _
+        0)
 end sub
 
 '------------------------------------------------------------
@@ -296,7 +289,12 @@ do
     ' Phase A: forward
     SetLayerOver(2)
     for ii = 1 to 190
-        UpdateBouncingSprite()
+        ' Equivalent to one NextBASIC SPRITE MOVE tick:
+        SpriteContinue_Tick(0)
+        SpriteContinue_Apply(0, SPR_ID, -1, 0, 0)
+
+        WaitRetrace(1)
+
         ox = ii : oy = ii
         ScrollLayer(ox, oy)
 
@@ -307,13 +305,16 @@ do
         end if
 
         if inkey$ <> "" then exit do
-        WaitRetrace(1)
     next ii
 
     ' Phase B: reverse
     SetLayerOver(4)
     for ii = 190 to 1 step -1
-        UpdateBouncingSprite()
+        SpriteContinue_Tick(0)
+        SpriteContinue_Apply(0, SPR_ID, -1, 0, 0)
+
+        WaitRetrace(1)
+
         ox = ii : oy = ii
         ScrollLayer(ox, oy)
 
@@ -324,7 +325,6 @@ do
         end if
 
         if inkey$ <> "" then exit do
-        WaitRetrace(1)
     next ii
 
     ' Once per outer iteration:
